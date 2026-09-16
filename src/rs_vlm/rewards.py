@@ -109,24 +109,6 @@ def grounding_semantic_reward(text: str, ground_truth: Any) -> float:
     return _bbox_iou(predicted, target) if predicted is not None and target is not None else 0.0
 
 
-def conditional_dense_count_reward(text: str, ground_truth: int) -> float:
-    """Reward the count-only contract used by dense conditional-grounding rows."""
-    payload = parse_json_payload(text)
-    value = payload.get("count") if payload is not None else None
-    if type(value) is not int or value < 0:
-        return 0.0
-    return math.exp(-abs(value - ground_truth) / (ground_truth + 1.0))
-
-
-def conditional_dense_format_reward(text: str) -> float:
-    candidate = text.strip()
-    if _JSON_FENCE.fullmatch(candidate):
-        return 0.0
-    payload = parse_json_payload(candidate)
-    value = payload.get("count") if payload is not None else None
-    return float(payload is not None and set(payload) == {"count"} and type(value) is int and value >= 0)
-
-
 def _valid_bbox(value: Any) -> list[float] | None:
     if not isinstance(value, list) or len(value) != 4:
         return None
@@ -147,10 +129,6 @@ def _bbox_iou(first: list[float], second: list[float]) -> float:
     area_second = (second[2] - second[0]) * (second[3] - second[1])
     union = area_first + area_second - intersection
     return intersection / union if union > 0 else 0.0
-
-
-def _greedy_match_count(predicted: list[list[float]], target: list[list[float]], threshold: float = 0.5) -> int:
-    return len(_greedy_matches(predicted, target, threshold))
 
 
 def _greedy_matches(
@@ -176,66 +154,6 @@ def _greedy_matches(
         used_target.add(target_index)
         matches.append((pred_index, target_index, score))
     return matches
-
-
-def conditional_dense_all_boxes_reward(text: str, ground_truth: list[Any]) -> float:
-    """Recall-oriented reward for complete dense conditional grounding.
-
-    The reward remains partially informative for imperfect JSON schemas, but a
-    perfect score requires exact all-box formatting and one-to-one localization.
-    Duplicate predictions receive an explicit penalty in addition to counting
-    as false positives during matching.
-    """
-    target = [box for box in (_valid_bbox(item) for item in ground_truth) if box is not None]
-    if not target:
-        return 0.0
-    payload = parse_json_payload(text)
-    raw_boxes = payload.get("selected_bboxes") if payload is not None else None
-    if not isinstance(raw_boxes, list):
-        return 0.0
-    predicted: list[list[float]] = []
-    invalid = 0
-    for item in raw_boxes:
-        box = _valid_bbox(item)
-        if box is None:
-            invalid += 1
-        else:
-            predicted.append(box)
-
-    true_positive = _greedy_match_count(predicted, target)
-    precision = true_positive / len(predicted) if predicted else 0.0
-    recall = true_positive / len(target)
-    f2 = 5 * precision * recall / (4 * precision + recall) if precision + recall else 0.0
-    soft_coverage = (
-        sum(max((_bbox_iou(pred_box, target_box) for pred_box in predicted), default=0.0) for target_box in target)
-        / len(target)
-    )
-    count_score = math.exp(-abs(len(predicted) - len(target)) / (len(target) + 1.0))
-    schema_ok = (
-        payload is not None
-        and set(payload) == {"count", "selected_bboxes"}
-        and type(payload.get("count")) is int
-        and payload["count"] == len(raw_boxes)
-        and invalid == 0
-        and not _JSON_FENCE.fullmatch(text.strip())
-    )
-    duplicate_pairs = sum(
-        _bbox_iou(predicted[left], predicted[right]) >= 0.9
-        for left in range(len(predicted))
-        for right in range(left + 1, len(predicted))
-    )
-    duplicate_penalty = min(1.0, duplicate_pairs / max(1, len(predicted)))
-    invalid_penalty = min(1.0, invalid / max(1, len(raw_boxes)))
-    reward = (
-        0.50 * f2
-        + 0.20 * recall
-        + 0.15 * soft_coverage
-        + 0.10 * count_score
-        + 0.05 * float(schema_ok)
-        - 0.10 * duplicate_penalty
-        - 0.10 * invalid_penalty
-    )
-    return max(0.0, min(1.0, reward))
 
 
 def _valid_boxes(values: Any) -> list[list[float]]:
@@ -271,7 +189,6 @@ def conditional_all_boxes_v8_reward(text: str, solution: dict[str, Any]) -> floa
 
     matches = _greedy_matches(predicted, target)
     matched_pred = {match[0] for match in matches}
-    matched_target = {match[1] for match in matches}
     duplicate = hard_false_positive = unknown = ignored_predictions = 0
     for pred_index, box in enumerate(predicted):
         if pred_index in matched_pred:
@@ -351,11 +268,6 @@ def combined_reward(text: str, task_type: str, solution: dict[str, Any]) -> floa
         semantic = count_semantic_reward(text, int(solution["value"]))
     elif task_type == "spatial":
         semantic = spatial_semantic_reward(text, str(solution["label"]))
-    elif task_type == "conditional_dense_count":
-        semantic = conditional_dense_count_reward(text, int(solution["value"]))
-        return 0.9 * semantic + 0.1 * conditional_dense_format_reward(text)
-    elif task_type == "conditional_dense_all_boxes":
-        return conditional_dense_all_boxes_reward(text, list(solution["bboxes"]))
     elif task_type == "conditional_all_boxes_v8":
         return conditional_all_boxes_v8_reward(text, solution)
     else:
@@ -382,8 +294,6 @@ class RemoteSensingTaskReward(ORM):
                 "grounding",
                 "count",
                 "spatial",
-                "conditional_dense_count",
-                "conditional_dense_all_boxes",
                 "conditional_all_boxes_v8",
             } or not isinstance(current_solution, dict):
                 rewards.append(0.0)

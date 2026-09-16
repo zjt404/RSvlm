@@ -1,210 +1,50 @@
-# Qwen3-VL-4B Remote-Sensing Assistant
+# 运行指南
 
-An end-to-end portfolio project for remote-sensing VLM adaptation:
+## 环境
 
-```text
-VRSBench + DIOR
-       -> validated multi-task JSONL
-       -> Qwen3-VL-4B LoRA SFT
-       -> task-conditioned GRPO
-       -> reproducible evaluation
-       -> FastAPI + Gradio demo
-```
-
-The model files may live in the project root on the target server. This file is intentionally named
-`PROJECT_README.md` so the upstream model card in `README.md` remains untouched.
-
-## What is implemented
-
-- VRSBench LLaVA/direct-JSON conversion for VQA and visual grounding.
-- Explicit conversion of VRSBench boxes from `0-100` to the project-wide `0-1000` coordinate space.
-- DIOR Pascal-VOC conversion for class counting and unambiguous eight-direction spatial QA.
-- Image-level deterministic train/validation/test splits and cross-split leakage checks.
-- Quota sampling for 40k SFT records and 8k GRPO prompts, including 20% zero-count examples.
-- Qwen3-VL LoRA SFT and task-conditioned GRPO launch scripts for ms-swift.
-- Dense count/spatial reward, strict JSON-format reward, and a count-only GRPO fallback dataset.
-- VQA, counting, grounding, spatial, JSON-validity, and shuffled-image evaluation.
-- Lazy-loading FastAPI inference service and Gradio client.
-
-## Server setup
-
-The expected server layout is:
-
-```text
-/workspace/zjt/qwen3vl/
-  model-*.safetensors
-  config.json
-  qwenvl/
-  src/
-  scripts/
-  data/
-  outputs/
-```
-
-Install the CUDA 12.1 PyTorch wheel and project dependencies:
+安装适合 GPU 的 PyTorch/CUDA 后：
 
 ```bash
-cd /workspace/zjt/qwen3vl
-bash scripts/bootstrap_server.sh
+pip install -e '.[train,app,dev]'
+python -m pytest -q
 ```
 
-The colocated vLLM path is optional. The current machine uses NVIDIA driver 535, so verify the CUDA
-requirement of the selected vLLM wheel before running:
+现有服务器环境使用 `source scripts/activate_qwenvl.sh`。脚本包含实验服务器路径，迁移时须调整。模型、数据和适配器需要单独准备。
+
+## 数据与训练
+
+通用数据转换和校验使用 `rs-vlm-data --help`。下载及准备入口为 `scripts/download_vrsbench.sh`、`scripts/download_dior.sh`、`scripts/prepare_data.sh`。
+
+最终权重的实际训练顺序：
+
+1. `scripts/train_sft.sh`：通用多任务 SFT。
+2. `scripts/prepare_context_v5_all_boxes.py`：关系全框数据及通用回放；专项训练入口为 `scripts/train_sft_context_stage2.sh`，须设置 TRAIN_DATA、VAL_DATA、BASE_ADAPTER、OUTPUT_DIR。历史默认值不代表最终专项运行配置，精确复现需使用原始 args.json。
+3. `scripts/prepare_context_v6_dense_sft.py` 与 `scripts/train_sft_context_v6_dense.sh`：加入密集样本并继续 SFT，得到结果表中的 SFT。
+4. `scripts/prepare_grpo_v8_mixed.py` 与 `scripts/train_grpo_v8_mixed.sh`：混合密度及通用回放 GRPO。
+
+数据构建参数使用脚本的 `--help` 查看。最终 GRPO：2,500 条样本，1 epoch，学习率 1e-6，KL 系数 0.04，每提示 4 个候选，LoRA rank 16 / alpha 32。完整原始运行配置和权重未随仓库发布。
+
+## 单图测试
 
 ```bash
-bash scripts/install_vllm_optional.sh
+python scripts/chat_v8.py --model /path/to/model --adapter /path/to/adapter --image /path/to/image.jpg --question "图中是否有船只？" --task vqa
 ```
 
-The correctness smoke tests do not require vLLM.
+使用 `--boxes` 请求全框输出；`--task count`、`grounding`、`spatial` 分别测试其他任务。不传任务参数时直接使用问题。每次调用重新加载模型，该入口是单图单轮测试。
 
-## Data preparation
-
-Download and extract VRSBench:
+## 统一评测
 
 ```bash
-bash scripts/download_vrsbench.sh
+# Baseline 不传 --adapter；SFT、GRPO 使用对应适配器。
+python -m rs_vlm.predict --dataset data/processed_fixed/sft_test.jsonl --model /path/to/model --adapter /path/to/adapter --max-new-tokens 512 --output outputs/general.jsonl
+rs-vlm-eval outputs/general.jsonl --output outputs/general_metrics.json
+
+python -m rs_vlm.predict --dataset data/processed_context_v6_dense_sft/sft_context_test.jsonl --model /path/to/model --adapter /path/to/adapter --max-new-tokens 1024 --output outputs/relation.jsonl
+python scripts/evaluate_context_all_boxes.py outputs/relation.jsonl --output outputs/relation_metrics.json
 ```
 
-Place DIOR in `data/raw/DIOR` with Pascal VOC layout:
+为各模型指定独立输出文件；预测入口会覆盖同名文件，不支持断点续评。比较时固定提示、图像和解码设置。
 
-```text
-DIOR/
-  Annotations/*.xml
-  JPEGImages/*.{jpg,png}
-```
+## 服务与审计
 
-DIOR distribution terms require obtaining the dataset from its official source. After both datasets
-are available:
-
-```bash
-bash scripts/prepare_data.sh
-```
-
-Outputs:
-
-```text
-data/processed/sft_train.jsonl
-data/processed/sft_val.jsonl
-data/processed/sft_test.jsonl
-data/processed/grpo_train.jsonl
-data/processed/grpo_count_train.jsonl
-data/processed/dataset_summary.json
-```
-
-Every SFT sample follows this contract:
-
-```json
-{
-  "messages": [
-    {"role": "user", "content": "<image> How many airplanes are visible? Return JSON only."},
-    {"role": "assistant", "content": "{\"answer\":12}"}
-  ],
-  "images": ["/absolute/path/image.png"],
-  "task_type": "count",
-  "solution": {"value": 12},
-  "meta": {"source": "DIOR", "image_id": "000123", "split": "train"}
-}
-```
-
-GRPO files intentionally omit the assistant turn so the reference answer cannot leak into the prompt.
-
-## Training
-
-Generate local smoke fixtures and run one SFT step:
-
-```bash
-python scripts/make_smoke_data.py
-SMOKE=1 bash scripts/train_sft.sh
-```
-
-Run full SFT:
-
-```bash
-bash scripts/train_sft.sh
-```
-
-Select the best SFT checkpoint, then run one GRPO correctness step without vLLM:
-
-```bash
-SFT_ADAPTER=/workspace/zjt/qwen3vl/outputs/sft/checkpoint-N \
-SMOKE=1 USE_VLLM=0 \
-bash scripts/train_grpo.sh
-```
-
-Run full mixed-task GRPO after the vLLM compatibility check:
-
-```bash
-SFT_ADAPTER=/workspace/zjt/qwen3vl/outputs/sft/checkpoint-N \
-USE_VLLM=1 \
-bash scripts/train_grpo.sh
-```
-
-If the mixed run fails the acceptance gate, use the predefined count-only fallback:
-
-```bash
-SFT_ADAPTER=/workspace/zjt/qwen3vl/outputs/sft/checkpoint-N \
-TRAIN_DATA=/workspace/zjt/qwen3vl/data/processed/grpo_count_train.jsonl \
-OUTPUT_DIR=/workspace/zjt/qwen3vl/outputs/grpo_count \
-bash scripts/train_grpo.sh
-```
-
-## Evaluation
-
-The prediction JSONL contains `task_type`, `solution`, `prediction`, and source metadata. Evaluate one
-file directly:
-
-```bash
-rs-vlm-eval outputs/evaluation/base.jsonl --output outputs/evaluation/base_metrics.json
-```
-
-Run Base, SFT, GRPO, and the GRPO shuffled-image control:
-
-```bash
-SFT_ADAPTER=/path/to/sft/checkpoint \
-GRPO_ADAPTER=/path/to/grpo/checkpoint \
-bash scripts/evaluate_models.sh
-```
-
-The reported metrics are:
-
-- VQA normalized exact-match accuracy.
-- Counting MAE, RMSE, exact accuracy, parse failure, and zero-target false-positive rate.
-- Grounding mean IoU and Acc@IoU 0.5.
-- Spatial accuracy and macro-F1.
-- Global JSON-valid rate.
-
-The shuffled-image run uses the same questions and solutions with permuted images. Its score drop is
-the visual-dependence control.
-
-## Demo
-
-Start API and UI together:
-
-```bash
-MODEL_PATH=/workspace/zjt/qwen3vl \
-ADAPTER_PATH=/path/to/accepted/adapter \
-bash scripts/serve.sh
-```
-
-- API health: `GET http://SERVER:8000/health`
-- API inference: `POST http://SERVER:8000/analyze`
-- Gradio: `http://SERVER:7860`
-
-## Acceptance gate
-
-Publish the GRPO adapter in the final demo only when:
-
-1. At least one reward-aligned metric improves over SFT.
-2. JSON-valid rate improves.
-3. VQA accuracy falls by no more than three percentage points.
-
-Otherwise report the mixed-run result and use the count-only fallback. Do not replace measured values
-with illustrative numbers.
-
-## Dataset restrictions
-
-VRSBench combines DIOR and DOTA-derived imagery. Its annotation and image terms are not identical,
-and DOTA-derived images are restricted to academic/non-commercial use. This repository does not
-redistribute datasets or trained weights. Review the official dataset terms before publishing a demo,
-adapter, or Docker image.
-
+服务入口为 `rs-vlm-api` 与 `rs-vlm-demo`，使用 `--help` 查看参数。误检分析和可视化使用 `scripts/analyze_all_boxes_false_positives.py` 与 `scripts/render_fp_proximity_audit.py`。audit 工具用于标注检查。`scripts/evaluate_context.py` 保留为旧标注协议解析测试的依赖，最终全框指标使用 `evaluate_context_all_boxes.py`。

@@ -3,10 +3,7 @@ import math
 from rs_vlm.rewards import (
     RemoteSensingTaskReward,
     combined_reward,
-    conditional_dense_all_boxes_reward,
     conditional_all_boxes_v8_reward,
-    conditional_dense_count_reward,
-    conditional_dense_format_reward,
     count_semantic_reward,
     json_format_reward,
     parse_json_payload,
@@ -27,28 +24,6 @@ def test_count_reward_is_normalized_and_dense():
     assert count_semantic_reward('{"answer":20}', 20) == 1.0
     assert math.isclose(count_semantic_reward('{"answer":18}', 20), math.exp(-2 / 21))
     assert count_semantic_reward('{"answer":-1}', 20) == 0.0
-
-
-def test_conditional_dense_count_reward_requires_count_only_schema():
-    assert conditional_dense_count_reward('{"count":12}', 12) == 1.0
-    assert math.isclose(conditional_dense_count_reward('{"count":10}', 12), math.exp(-2 / 13))
-    assert conditional_dense_count_reward('{"answer":12}', 12) == 0.0
-    assert conditional_dense_format_reward('{"count":12}') == 1.0
-    assert conditional_dense_format_reward('{"count":12,"selected_bboxes":[]}') == 0.0
-    assert combined_reward('{"count":12}', "conditional_dense_count", {"value": 12}) == 1.0
-
-
-def test_conditional_dense_all_boxes_reward_prefers_recall_and_penalizes_duplicates():
-    target = [[0, 0, 100, 100], [200, 200, 300, 300]]
-    perfect = '{"count":2,"selected_bboxes":[[0,0,100,100],[200,200,300,300]]}'
-    partial = '{"count":1,"selected_bboxes":[[0,0,100,100]]}'
-    duplicate = '{"count":2,"selected_bboxes":[[0,0,100,100],[0,0,100,100]]}'
-    malformed = '{"count":2,"selected_bboxes":[[0,0,100,100],[1,1,1,2]]}'
-    assert conditional_dense_all_boxes_reward(perfect, target) == 1.0
-    assert conditional_dense_all_boxes_reward(perfect, target) > conditional_dense_all_boxes_reward(partial, target)
-    assert conditional_dense_all_boxes_reward(partial, target) > conditional_dense_all_boxes_reward(duplicate, target)
-    assert conditional_dense_all_boxes_reward(malformed, target) < conditional_dense_all_boxes_reward(partial, target)
-    assert combined_reward(perfect, "conditional_dense_all_boxes", {"bboxes": target}) == 1.0
 
 
 def test_v8_all_boxes_penalizes_distractors_but_not_ignored_annotations():
