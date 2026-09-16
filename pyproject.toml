@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remote-sensing-qwen3vl"
+version = "0.1.0"
+description = "Reproducible SFT and GRPO pipeline for Qwen3-VL remote-sensing tasks"
+readme = "PROJECT_README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "numpy>=1.26,<3",
+  "pillow>=10,<13",
+]
+
+[project.optional-dependencies]
+train = [
+  "accelerate>=1.0",
+  "datasets>=3.0",
+  "modelscope>=1.20",
+  "ms-swift>=4.0,<5",
+  "peft>=0.15",
+  "qwen-vl-utils>=0.0.14",
+  "safetensors>=0.5",
+  "transformers>=4.57,<5",
+]
+app = [
+  "fastapi>=0.115",
+  "gradio>=5.0",
+  "python-multipart>=0.0.20",
+  "requests>=2.32",
+  "uvicorn[standard]>=0.34",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+rs-vlm-data = "rs_vlm.data.cli:main"
+rs-vlm-eval = "rs_vlm.metrics:main"
+rs-vlm-api = "rs_vlm.api:main"
+rs-vlm-demo = "rs_vlm.demo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
